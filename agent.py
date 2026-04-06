@@ -1,12 +1,20 @@
-﻿"""Single-file Harbor agent harness: --agent-import-path agent:AutoAgent."""
+"""Single-file Harbor agent harness: --agent-import-path agent:AutoAgent."""
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 
-from agents import Agent, ModelSettings, Runner, function_tool
+from agents import (
+    Agent,
+    ModelSettings,
+    Runner,
+    function_tool,
+    set_default_openai_client,
+    set_tracing_disabled,
+)
 from agents.items import (
     ItemHelpers,
     MessageOutputItem,
@@ -14,11 +22,13 @@ from agents.items import (
     ToolCallItem,
     ToolCallOutputItem,
 )
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.tool import FunctionTool
 from agents.usage import Usage
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 
 
@@ -49,10 +59,71 @@ Important rules:
 
 MODEL = "gpt-5.4"
 MAX_TURNS = 30
-MODEL_SETTINGS = ModelSettings(
-    reasoning=Reasoning(effort="high"),
-    verbosity="low",
-)
+
+
+def get_provider() -> str:
+    return os.getenv("MODEL_PROVIDER", "openai").strip().lower()
+
+
+def get_model_name() -> str:
+    provider = get_provider()
+    if provider == "openrouter":
+        return os.getenv("OPENROUTER_MODEL", "minimax/minimax-m2").strip()
+    return os.getenv("OPENAI_MODEL", MODEL).strip()
+
+
+def get_model_profile() -> str:
+    provider = get_provider()
+    model_name = get_model_name()
+    if provider == "openrouter":
+        return f"openrouter/{model_name}"
+    reasoning = os.getenv("OPENAI_REASONING_EFFORT", "high").strip().lower()
+    return f"openai/{model_name}/{reasoning}"
+
+
+def create_model_settings() -> ModelSettings:
+    provider = get_provider()
+    if provider == "openrouter":
+        return ModelSettings()
+
+    reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "high").strip().lower()
+    return ModelSettings(reasoning=Reasoning(effort=reasoning_effort))
+
+
+def create_model() -> str | OpenAIChatCompletionsModel:
+    provider = get_provider()
+    model_name = get_model_name()
+
+    if provider == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "MODEL_PROVIDER=openrouter requires OPENROUTER_API_KEY to be set."
+            )
+
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        site_url = os.getenv(
+            "OPENROUTER_SITE_URL",
+            "https://github.com/kishorkukreja/sc-auto-research-order-cuts",
+        )
+        app_name = os.getenv(
+            "OPENROUTER_APP_NAME",
+            "sc-auto-research-order-cuts",
+        )
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers={
+                "HTTP-Referer": site_url,
+                "X-Title": app_name,
+            },
+        )
+        set_default_openai_client(client, use_for_tracing=False)
+        set_tracing_disabled(True)
+        return OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+
+    set_tracing_disabled(False)
+    return model_name
 
 
 def create_tools(environment: BaseEnvironment) -> list[FunctionTool]:
@@ -82,12 +153,14 @@ def create_tools(environment: BaseEnvironment) -> list[FunctionTool]:
 def create_agent(environment: BaseEnvironment) -> Agent:
     """Build the agent. Modify to add handoffs, sub-agents, or agent-as-tool."""
     tools = create_tools(environment)
+    model_settings = create_model_settings()
+    model = create_model()
     return Agent(
         name="supply-chain-autoagent",
         instructions=SYSTEM_PROMPT,
         tools=tools,
-        model=MODEL,
-        model_settings=MODEL_SETTINGS,
+        model=model,
+        model_settings=model_settings,
     )
 
 
@@ -252,7 +325,8 @@ class AutoAgent(BaseAgent):
 
         result, duration_ms = await run_task(environment, instruction)
 
-        atif = to_atif(result, model=MODEL, duration_ms=duration_ms)
+        resolved_model = get_model_profile()
+        atif = to_atif(result, model=resolved_model, duration_ms=duration_ms)
         traj_path = self.logs_dir / "trajectory.json"
         traj_path.write_text(json.dumps(atif, indent=2))
 
@@ -268,7 +342,7 @@ class AutoAgent(BaseAgent):
         for response in result.raw_responses:
             usage.add(response.usage)
         print(
-            f"turns={len(result.raw_responses)} duration_ms={duration_ms} "
+            f"model_profile={resolved_model} turns={len(result.raw_responses)} duration_ms={duration_ms} "
             f"input={usage.input_tokens} output={usage.output_tokens}"
         )
 

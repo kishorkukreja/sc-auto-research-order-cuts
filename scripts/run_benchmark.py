@@ -4,10 +4,21 @@ import argparse
 import shlex
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def default_model_profile() -> str:
+    provider = os.getenv("MODEL_PROVIDER", "openai").strip().lower()
+    if provider == "openrouter":
+        model_name = os.getenv("OPENROUTER_MODEL", "minimax/minimax-m2").strip()
+        return f"openrouter/{model_name}"
+    model_name = os.getenv("OPENAI_MODEL", "gpt-5.4").strip()
+    reasoning = os.getenv("OPENAI_REASONING_EFFORT", "high").strip().lower()
+    return f"openai/{model_name}/{reasoning}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,8 +74,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-profile",
-        default="gpt-5.4/high",
-        help="model_profile value written to results.tsv",
+        default="",
+        help="model_profile value written to results.tsv. If omitted, inferred from env vars.",
     )
     parser.add_argument(
         "--status",
@@ -156,7 +167,7 @@ def main() -> None:
         "--pass-threshold",
         str(args.pass_threshold),
         "--model-profile",
-        args.model_profile,
+        args.model_profile or default_model_profile(),
         "--status",
         args.status,
         "--description",

@@ -1,4 +1,4 @@
-﻿# Supply Chain AutoAgent
+# Supply Chain AutoAgent
 
 AutoAgent-style autonomous harness engineering for the order-cut optimisation PoC described in `docs/`.
 
@@ -32,7 +32,7 @@ tasks/
 
 ## Quick start
 
-Create a local `.env` from `.env.example` and set your OpenAI API key before real benchmark runs.
+Create a local `.env` from `.env.example` and choose either OpenAI mode or OpenRouter mode before real benchmark runs.
 
 ```bash
 # 0. Configure environment
@@ -66,6 +66,66 @@ It also regenerates:
 
 after each logged run, so you have a blog/LinkedIn-friendly visual showing how
 score evolves over time.
+
+
+## Model provider modes
+
+This harness now supports **both OpenAI and OpenRouter**.
+
+### Option A - OpenAI
+
+Use the default GPT-5.4 setup:
+
+```env
+MODEL_PROVIDER=openai
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-5.4
+OPENAI_REASONING_EFFORT=high
+```
+
+### Option B - OpenRouter
+
+Use any OpenRouter model slug supported by the OpenAI-compatible chat endpoint:
+
+```env
+MODEL_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=minimax/minimax-m2
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_SITE_URL=https://github.com/kishorkukreja/sc-auto-research-order-cuts
+OPENROUTER_APP_NAME=sc-auto-research-order-cuts
+```
+
+Examples you can test by changing `OPENROUTER_MODEL`:
+
+- `minimax/minimax-m2`
+- `minimax/minimax-m2.7`
+- `z-ai/glm-5`
+- `xiaomi/mimo-v2-pro`
+- `google/gemma-4-31b-it`
+- `nvidia/nemotron-3-super-120b-a12b:free`
+
+The run logger will automatically record the provider/model profile into `results.tsv`, so you can compare cost and score across providers.
+
+## Suggested comparison workflow
+
+Run the same benchmark twice with different env settings:
+
+```bash
+# OpenAI baseline
+python scripts/run_benchmark.py --concurrency 20 --status baseline --description "openai baseline"
+
+# OpenRouter comparison
+python scripts/run_benchmark.py --concurrency 20 --status run --description "openrouter minimax m2"
+```
+
+That will let you compare:
+
+- score
+- pass rate
+- average turns
+- token usage
+- progress chart
 
 ## Output contract for the task agent
 

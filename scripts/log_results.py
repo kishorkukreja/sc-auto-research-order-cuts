@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS_PATH = ROOT / "results.tsv"
 DEFAULT_JOBS_DIR = ROOT / "jobs"
 DEFAULT_PASS_THRESHOLD = 0.80
-DEFAULT_MODEL_PROFILE = "gpt-5.4/high"
+DEFAULT_MODEL_PROFILE = ""
 DEFAULT_PROGRESS_PNG = ROOT / "progress.png"
 DEFAULT_PROGRESS_SVG = ROOT / "progress.svg"
 
@@ -79,6 +80,16 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG chart path",
     )
     return parser.parse_args()
+
+
+def default_model_profile() -> str:
+    provider = os.getenv("MODEL_PROVIDER", "openai").strip().lower()
+    if provider == "openrouter":
+        model_name = os.getenv("OPENROUTER_MODEL", "minimax/minimax-m2").strip()
+        return f"openrouter/{model_name}"
+    model_name = os.getenv("OPENAI_MODEL", "gpt-5.4").strip()
+    reasoning = os.getenv("OPENAI_REASONING_EFFORT", "high").strip().lower()
+    return f"openai/{model_name}/{reasoning}"
 
 
 def latest_job_dir(jobs_dir: Path) -> Path:
@@ -258,7 +269,7 @@ def main() -> None:
     line = append_result_row(
         results_path=args.results_path,
         root=ROOT,
-        model_profile=args.model_profile,
+        model_profile=args.model_profile or default_model_profile(),
         pass_threshold=args.pass_threshold,
         status=args.status,
         description=f"{args.description} | job={job_dir.name}",

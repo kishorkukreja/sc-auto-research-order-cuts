@@ -1,4 +1,4 @@
-﻿# supply-chain-autoagent
+# supply-chain-autoagent
 
 Autonomous agent engineering for a supply-chain order-cut optimisation benchmark.
 
@@ -26,8 +26,12 @@ weighted fill rate.
 
 Evaluation is done by deterministic task-specific verifiers.
 
-Do **not** change the model from `gpt-5.4` with reasoning effort `high` unless the human explicitly changes
-that constraint.
+The harness now supports two explicit execution modes:
+
+- **OpenAI mode**: `gpt-5.4` with reasoning effort `high`
+- **OpenRouter mode**: OpenAI-compatible chat models via env-configured model slugs
+
+Do not remove dual-provider support unless the human explicitly asks.
 
 ## GPT-5.4 high optimization profile
 
@@ -54,6 +58,18 @@ In practice, a good GPT-5.4-high harness in this repo should:
 - validate the output file before finishing
 - avoid excessive narration between tool calls
 - avoid spending extra reasoning budget on prose that does not improve the allocation
+
+## OpenRouter compatibility profile
+
+The repo must also remain compatible with OpenRouter-hosted models accessed via
+an OpenAI-compatible Chat Completions interface.
+
+When evaluating or improving OpenRouter mode:
+
+- prefer tool-calling and output-validation patterns that are robust across providers
+- avoid GPT-5-specific assumptions where possible
+- treat provider portability as a real harness quality dimension
+- compare score against cost and turns, not just absolute intelligence
 
 ## Domain context
 
