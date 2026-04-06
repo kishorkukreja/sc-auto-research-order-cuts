@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-05",
+  "title": "Balanced shortage across all weeks",
+  "description": "Capacity stays below demand for the whole horizon with no single catastrophic week.",
+  "seed": 1005
+}

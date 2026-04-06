@@ -1,0 +1,6 @@
+retailer,sku,week_start,week_end,promo_type,uplift_factor
+RET_A,ALL,5,7,FEATURE,1.32
+RET_C,SKU_03,8,9,DISPLAY,1.25
+RET_A,ALL,14,15,DISPLAY,1.3
+RET_C,SKU_03,14,15,TPRICE,1.42
+RET_C,SKU_08,14,15,TPRICE,1.38

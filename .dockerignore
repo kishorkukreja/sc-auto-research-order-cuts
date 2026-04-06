@@ -1,0 +1,12 @@
+﻿.git
+.gitignore
+.env
+.venv
+jobs
+run.log
+results.tsv
+_reference_autoagent
+_reference_harbor
+
+output
+

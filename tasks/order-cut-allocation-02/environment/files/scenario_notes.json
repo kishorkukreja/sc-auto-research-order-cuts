@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-02",
+  "title": "Dual promo conflict",
+  "description": "RET_A and RET_C have overlapping promotions that force sharper trade-offs in weeks 14-15.",
+  "seed": 1002
+}

@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-10",
+  "title": "High-volume low-margin trap",
+  "description": "Large low-margin orders can soak up capacity unless the agent follows commercial weighting correctly.",
+  "seed": 1010
+}

@@ -1,0 +1,13 @@
+﻿.env
+.omx/
+.venv/
+__pycache__/
+*.pyc
+jobs/
+run.log
+results.tsv
+data/generated/
+_reference_autoagent/
+_reference_harbor/
+
+output/
