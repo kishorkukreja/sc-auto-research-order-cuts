@@ -31,6 +31,14 @@ from harbor.models.agent.context import AgentContext
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
+
 
 # ============================================================================
 # EDITABLE HARNESS — prompt, tools, agent construction
@@ -39,26 +47,26 @@ from openai.types.shared import Reasoning
 SYSTEM_PROMPT = """
 You are a supply-chain allocation agent.
 
-Your job is to solve the task in /task/instruction.md and write the required
-artifact to disk.
+Your input message already contains the full task instruction. Do not waste turns
+re-reading large raw CSV files unless a built-in tool fails.
 
-Always follow this workflow:
-1. Read /task/instruction.md carefully.
-2. Inspect the visible files under /task/environment/files/.
-3. Use Python or shell-based computation for any arithmetic or allocation logic.
-4. Produce /app/output/allocation_plan.json in the exact requested schema.
-5. Verify that weekly totals do not exceed capacity before you finish.
+Default workflow:
+1. Call summarize_inputs once.
+2. Call build_allocation_plan once, using the default score-aligned strategy.
+3. Call validate_allocation_plan.
+4. If validation is clean, finish with a very short summary.
+5. Use run_shell only as a fallback.
 
 Important rules:
 - Never rely on mental math for allocations.
-- Prefer writing a short Python script to compute the plan.
-- If the instruction requires JSON, make sure the file is valid JSON.
-- If you are unsure, inspect the CSV headers directly.
+- Prefer the structured optimizer and validator tools over ad hoc shell exploration.
+- Optimize for the weighted fill-rate objective under weekly capacity.
+- Keep the plan feasible and include every visible (week, sku, retailer) row exactly once.
 - Finish with a concise summary of what you wrote.
 """.strip()
 
 MODEL = "gpt-5.4"
-MAX_TURNS = 30
+MAX_TURNS = 10
 
 
 def get_provider() -> str:
@@ -129,11 +137,9 @@ def create_model() -> str | OpenAIChatCompletionsModel:
 def create_tools(environment: BaseEnvironment) -> list[FunctionTool]:
     """Create tools for the agent. Add new tools here."""
 
-    @function_tool
-    async def run_shell(command: str) -> str:
-        """Run a shell command in the task environment. Returns stdout and stderr."""
+    async def _exec(command: str, timeout_sec: int = 120) -> str:
         try:
-            result = await environment.exec(command=command, timeout_sec=120)
+            result = await environment.exec(command=command, timeout_sec=timeout_sec)
             out = ""
             if result.stdout:
                 out += result.stdout
@@ -147,7 +153,294 @@ def create_tools(environment: BaseEnvironment) -> list[FunctionTool]:
         except Exception as exc:
             return f"ERROR: {exc}"
 
-    return [run_shell]
+    async def _exec_python(script: str, timeout_sec: int = 120) -> str:
+        command = (
+            "cat <<'PY' > /tmp/autoagent_tool.py\n"
+            + script
+            + "\nPY\npython3 /tmp/autoagent_tool.py"
+        )
+        return await _exec(command, timeout_sec=timeout_sec)
+
+    @function_tool
+    async def run_shell(command: str) -> str:
+        """Run a shell command in the task environment. Returns stdout and stderr."""
+        return await _exec(command, timeout_sec=60)
+
+    @function_tool
+    async def summarize_inputs() -> str:
+        """Return a compact summary of the visible task files and the recommended allocation strategy."""
+        script = r"""
+import json
+from pathlib import Path
+import pandas as pd
+
+base = Path("/task/environment/files")
+future = pd.read_csv(base / "future_orders.csv")
+capacity_path = base / "capacity_schedule.csv"
+capacity = pd.read_csv(capacity_path) if capacity_path.exists() else None
+train_path = base / "train_history.csv"
+train = pd.read_csv(train_path) if train_path.exists() else None
+scenario_path = base / "scenario_notes.json"
+scenario = {}
+if scenario_path.exists():
+    try:
+        scenario = json.loads(scenario_path.read_text())
+    except Exception:
+        scenario = {}
+
+future = future.copy()
+future["priority_weight"] = future["revenue_weight"].fillna(0) * future["priority_multiplier"].fillna(1)
+future["score_per_case"] = future["priority_weight"] / future["orders_placed"].clip(lower=1)
+future["score_per_case"] = future["score_per_case"] * future["promo_flag"].map(lambda x: 1.05 if int(x) else 1.0)
+
+capacity_map = {}
+if capacity is not None and {"week", "capacity_cases"} <= set(capacity.columns):
+    capacity_map = {int(row.week): int(row.capacity_cases) for row in capacity.itertuples(index=False)}
+else:
+    capacity_map = {int(week): int(group["capacity_cases"].iloc[0]) for week, group in future.groupby("week")}
+
+week_rows = []
+for week, group in future.groupby("week", sort=True):
+    total_orders = int(group["orders_placed"].sum())
+    cap = int(capacity_map[int(week)])
+    week_rows.append({
+        "week": int(week),
+        "capacity_cases": cap,
+        "total_orders": total_orders,
+        "capacity_gap": cap - total_orders,
+    })
+
+top_rows = []
+for row in future.sort_values(
+    ["score_per_case", "priority_weight", "promo_flag", "orders_placed"],
+    ascending=[False, False, False, True],
+).head(8).itertuples(index=False):
+    top_rows.append({
+        "week": int(row.week),
+        "sku": row.sku,
+        "retailer": row.retailer,
+        "orders_placed": int(row.orders_placed),
+        "promo_flag": int(row.promo_flag),
+        "priority_weight": round(float(row.priority_weight), 6),
+        "score_per_case": round(float(row.score_per_case), 6),
+    })
+
+recent_fill = None
+if train is not None and {"orders_placed", "shipments"} <= set(train.columns):
+    denom = train["orders_placed"].replace({0: pd.NA})
+    ratio = (train["shipments"] / denom).dropna()
+    if not ratio.empty:
+        recent_fill = round(float(ratio.tail(min(96, len(ratio))).mean()), 4)
+
+payload = {
+    "scenario_name": scenario.get("scenario_name") or scenario.get("name"),
+    "weeks": week_rows,
+    "recent_historical_fill_rate": recent_fill,
+    "recommended_strategy": "score_aligned_greedy",
+    "strategy_note": "Prioritize rows by (revenue_weight * priority_multiplier) / orders_placed, then fill within weekly capacity.",
+    "top_priority_rows": top_rows,
+}
+print(json.dumps(payload, indent=2))
+"""
+        return await _exec_python(script)
+
+    @function_tool
+    async def build_allocation_plan(strategy: str = "score_aligned_greedy") -> str:
+        """Build /app/output/allocation_plan.json using a score-aligned weekly capacity heuristic."""
+        script = f"""
+import json
+from pathlib import Path
+import pandas as pd
+
+base = Path("/task/environment/files")
+future = pd.read_csv(base / "future_orders.csv").copy()
+capacity_path = base / "capacity_schedule.csv"
+capacity = pd.read_csv(capacity_path) if capacity_path.exists() else None
+
+future["_row_id"] = range(len(future))
+future["priority_weight"] = future["revenue_weight"].fillna(0) * future["priority_multiplier"].fillna(1)
+future["score_per_case"] = future["priority_weight"] / future["orders_placed"].clip(lower=1)
+future["score_per_case"] = future["score_per_case"] * future["promo_flag"].map(lambda x: 1.05 if int(x) else 1.0)
+
+if capacity is not None and {{"week", "capacity_cases"}} <= set(capacity.columns):
+    capacity_map = {{int(row.week): int(row.capacity_cases) for row in capacity.itertuples(index=False)}}
+else:
+    capacity_map = {{int(week): int(group["capacity_cases"].iloc[0]) for week, group in future.groupby("week")}}
+
+allocations = []
+week_summary = []
+
+for week, group in future.groupby("week", sort=True):
+    group = group.copy()
+    week_int = int(week)
+    capacity_cases = int(capacity_map[week_int])
+    total_orders = int(group["orders_placed"].sum())
+
+    if total_orders <= capacity_cases:
+        group["recommended_qty"] = group["orders_placed"].astype(int)
+    else:
+        if "{strategy}" == "weighted_proportional":
+            weights = (group["priority_weight"] * group["orders_placed"]).astype(float)
+            if float(weights.sum()) <= 0:
+                weights = group["orders_placed"].astype(float)
+            target = capacity_cases * weights / float(weights.sum())
+            base_alloc = target.clip(upper=group["orders_placed"]).fillna(0).astype(int)
+            remaining = capacity_cases - int(base_alloc.sum())
+            group["recommended_qty"] = base_alloc
+            if remaining > 0:
+                remainder = (target - base_alloc).fillna(0)
+                order = group.assign(_remainder=remainder).sort_values(
+                    ["_remainder", "priority_weight", "promo_flag", "orders_placed"],
+                    ascending=[False, False, False, True],
+                )
+                for idx in order.index:
+                    if remaining <= 0:
+                        break
+                    spare = int(group.at[idx, "orders_placed"] - group.at[idx, "recommended_qty"])
+                    if spare <= 0:
+                        continue
+                    give = min(spare, remaining)
+                    group.at[idx, "recommended_qty"] += give
+                    remaining -= give
+        else:
+            group = group.sort_values(
+                ["score_per_case", "priority_weight", "promo_flag", "orders_placed"],
+                ascending=[False, False, False, True],
+            )
+            remaining = capacity_cases
+            recs = []
+            for row in group.itertuples(index=False):
+                qty = min(int(row.orders_placed), remaining)
+                recs.append(qty)
+                remaining -= qty
+            group["recommended_qty"] = recs
+
+    week_summary.append({{
+        "week": week_int,
+        "capacity_cases": capacity_cases,
+        "total_orders": total_orders,
+        "allocated_cases": int(group["recommended_qty"].sum()),
+    }})
+    allocations.append(group)
+
+plan_df = pd.concat(allocations, ignore_index=True).sort_values("_row_id")
+plan = [
+    {{
+        "week": int(row.week),
+        "sku": row.sku,
+        "retailer": row.retailer,
+        "recommended_qty": int(row.recommended_qty),
+    }}
+    for row in plan_df.itertuples(index=False)
+]
+
+out_path = Path("/app/output/allocation_plan.json")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(plan, indent=2))
+
+summary = {{
+    "strategy": "{strategy}",
+    "rows_written": len(plan),
+    "output_path": str(out_path),
+    "week_summary": week_summary,
+}}
+print(json.dumps(summary, indent=2))
+"""
+        return await _exec_python(script)
+
+    @function_tool
+    async def validate_allocation_plan() -> str:
+        """Validate /app/output/allocation_plan.json against visible rows and weekly capacity."""
+        script = r"""
+import json
+from pathlib import Path
+import pandas as pd
+
+base = Path("/task/environment/files")
+future = pd.read_csv(base / "future_orders.csv").copy()
+capacity_path = base / "capacity_schedule.csv"
+capacity = pd.read_csv(capacity_path) if capacity_path.exists() else None
+
+payload = {
+    "valid": False,
+    "errors": [],
+    "weekly_totals": {},
+    "row_count": 0,
+}
+
+plan_path = Path("/app/output/allocation_plan.json")
+if not plan_path.exists():
+    payload["errors"].append("allocation_plan.json does not exist")
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+try:
+    plan = json.loads(plan_path.read_text())
+except Exception as exc:
+    payload["errors"].append(f"invalid JSON: {exc}")
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+if not isinstance(plan, list):
+    payload["errors"].append("output is not a JSON array")
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+plan_df = pd.DataFrame(plan)
+payload["row_count"] = int(len(plan_df))
+required_cols = {"week", "sku", "retailer", "recommended_qty"}
+missing_cols = sorted(required_cols - set(plan_df.columns))
+if missing_cols:
+    payload["errors"].append(f"missing columns: {missing_cols}")
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+expected = future[["week", "sku", "retailer"]].copy()
+expected["_key"] = expected.astype(str).agg("|".join, axis=1)
+plan_df["_key"] = plan_df[["week", "sku", "retailer"]].astype(str).agg("|".join, axis=1)
+
+missing_rows = sorted(set(expected["_key"]) - set(plan_df["_key"]))
+extra_rows = sorted(set(plan_df["_key"]) - set(expected["_key"]))
+duplicate_count = int(plan_df["_key"].duplicated().sum())
+negative_count = int((pd.to_numeric(plan_df["recommended_qty"], errors="coerce").fillna(-1) < 0).sum())
+
+if missing_rows:
+    payload["errors"].append(f"missing rows: {len(missing_rows)}")
+if extra_rows:
+    payload["errors"].append(f"extra rows: {len(extra_rows)}")
+if duplicate_count:
+    payload["errors"].append(f"duplicate rows: {duplicate_count}")
+if negative_count:
+    payload["errors"].append(f"negative or invalid recommended_qty rows: {negative_count}")
+
+if capacity is not None and {"week", "capacity_cases"} <= set(capacity.columns):
+    capacity_map = {int(row.week): int(row.capacity_cases) for row in capacity.itertuples(index=False)}
+else:
+    capacity_map = {int(week): int(group["capacity_cases"].iloc[0]) for week, group in future.groupby("week")}
+
+weekly = (
+    plan_df.groupby("week", dropna=False)["recommended_qty"]
+    .sum()
+    .to_dict()
+)
+for week, total in weekly.items():
+    week_int = int(week)
+    total_int = int(total)
+    limit = int(capacity_map.get(week_int, 0))
+    payload["weekly_totals"][str(week_int)] = {
+        "allocated_cases": total_int,
+        "capacity_cases": limit,
+        "within_capacity": total_int <= limit,
+    }
+    if total_int > limit:
+        payload["errors"].append(f"week {week_int} exceeds capacity: {total_int} > {limit}")
+
+payload["valid"] = not payload["errors"]
+print(json.dumps(payload, indent=2))
+"""
+        return await _exec_python(script)
+
+    return [summarize_inputs, build_allocation_plan, validate_allocation_plan, run_shell]
 
 
 def create_agent(environment: BaseEnvironment) -> Agent:

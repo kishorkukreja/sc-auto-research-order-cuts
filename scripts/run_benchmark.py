@@ -7,8 +7,35 @@ import sys
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+if load_dotenv:
+    load_dotenv(ROOT / ".env")
+
+
+def force_utf8_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def build_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
+    return env
 
 
 def default_model_profile() -> str:
@@ -32,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--task-name",
-        help="Optional single task name passed to harbor via --task-name",
+        help="Optional single task name passed to harbor via --task",
     )
     parser.add_argument(
         "--concurrency",
@@ -89,25 +116,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-file",
-        default="run.log",
+        default="logs/runs/run.log",
         help="File to capture Harbor stdout/stderr",
     )
     parser.add_argument(
         "--progress-png",
-        default="progress.png",
+        default="artifacts/plots/progress.png",
         help="PNG path for the auto-generated progress chart",
     )
     parser.add_argument(
         "--progress-svg",
-        default="progress.svg",
+        default="artifacts/plots/progress.svg",
         help="SVG path for the auto-generated progress chart",
     )
     return parser.parse_args()
 
 
 def run_command(command: list[str], *, stdout_path: Path | None = None) -> None:
+    env = build_subprocess_env()
     if stdout_path is None:
-        subprocess.run(command, cwd=ROOT, check=True)
+        subprocess.run(command, cwd=ROOT, check=True, env=env)
         return
 
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,17 +146,29 @@ def run_command(command: list[str], *, stdout_path: Path | None = None) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         assert process.stdout is not None
         for line in process.stdout:
-            print(line, end="")
+            try:
+                print(line, end="")
+            except UnicodeEncodeError:
+                sys.stdout.buffer.write(line.encode("utf-8", errors="replace"))
+                sys.stdout.buffer.flush()
             log_file.write(line)
         return_code = process.wait()
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, command)
 
 
+def harbor_result_exists(output_dir: str, job_name: str) -> bool:
+    return (ROOT / output_dir / job_name / "result.json").exists()
+
+
 def main() -> None:
+    force_utf8_stdio()
     args = parse_args()
 
     if args.generate_benchmark:
@@ -151,19 +191,27 @@ def main() -> None:
         args.job_name,
     ]
     if args.task_name:
-        harbor_cmd.extend(["--task-name", args.task_name])
+        harbor_cmd.extend(["--task", args.task_name])
     if args.limit is not None:
         harbor_cmd.extend(["-l", str(args.limit)])
 
     print("Running Harbor:")
     print(" ".join(shlex.quote(part) for part in harbor_cmd))
-    run_command(harbor_cmd, stdout_path=ROOT / args.log_file)
+    try:
+        run_command(harbor_cmd, stdout_path=ROOT / args.log_file)
+    except subprocess.CalledProcessError:
+        if harbor_result_exists(args.output_dir, args.job_name):
+            print(
+                f"Harbor exited non-zero for {args.job_name}, but result.json exists; continuing to log partial results."
+            )
+        else:
+            raise
 
     log_cmd = [
         sys.executable,
         "scripts/log_results.py",
-        "--jobs-dir",
-        args.output_dir,
+        "--job-dir",
+        str(Path(args.output_dir) / args.job_name),
         "--pass-threshold",
         str(args.pass_threshold),
         "--model-profile",

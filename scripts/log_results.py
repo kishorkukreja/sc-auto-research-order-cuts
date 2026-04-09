@@ -12,11 +12,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS_PATH = ROOT / "results.tsv"
+DEFAULT_RESULTS_DETAILED_PATH = ROOT / "results_detailed.tsv"
 DEFAULT_JOBS_DIR = ROOT / "jobs"
 DEFAULT_PASS_THRESHOLD = 0.80
 DEFAULT_MODEL_PROFILE = ""
-DEFAULT_PROGRESS_PNG = ROOT / "progress.png"
-DEFAULT_PROGRESS_SVG = ROOT / "progress.svg"
+DEFAULT_PROGRESS_PNG = ROOT / "artifacts" / "plots" / "progress.png"
+DEFAULT_PROGRESS_SVG = ROOT / "artifacts" / "plots" / "progress.svg"
 
 
 @dataclass
@@ -45,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_RESULTS_PATH,
         help="Path to results.tsv",
+    )
+    parser.add_argument(
+        "--results-detailed-path",
+        type=Path,
+        default=DEFAULT_RESULTS_DETAILED_PATH,
+        help="Path to results_detailed.tsv",
     )
     parser.add_argument(
         "--pass-threshold",
@@ -78,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_PROGRESS_SVG,
         help="Output SVG chart path",
+    )
+    parser.add_argument(
+        "--skip-visuals",
+        action="store_true",
+        help="Append results without regenerating charts.",
     )
     return parser.parse_args()
 
@@ -144,6 +156,43 @@ def parse_trajectory_metrics(trial_dir: Path) -> dict[str, float | None]:
     }
 
 
+def parse_trial_result_metrics(trial_dir: Path) -> dict[str, float | None]:
+    result_path = trial_dir / "result.json"
+    if not result_path.exists():
+        return {
+            "turns": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "cost_usd": None,
+        }
+
+    payload = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    agent_result: dict[str, Any] = payload.get("agent_result") or {}
+    exception_info = payload.get("exception_info")
+    if not exception_info:
+        return {
+            "turns": None,
+            "input_tokens": _as_float(agent_result.get("n_input_tokens")),
+            "output_tokens": _as_float(agent_result.get("n_output_tokens")),
+            "cost_usd": _as_float(agent_result.get("cost_usd")),
+        }
+
+    exception_message = str(exception_info.get("exception_message", ""))
+    turns = None
+    if "Max turns (" in exception_message:
+        try:
+            turns = float(exception_message.split("Max turns (", 1)[1].split(")", 1)[0])
+        except Exception:
+            turns = None
+
+    return {
+        "turns": turns,
+        "input_tokens": _as_float(agent_result.get("n_input_tokens")),
+        "output_tokens": _as_float(agent_result.get("n_output_tokens")),
+        "cost_usd": _as_float(agent_result.get("cost_usd")),
+    }
+
+
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -165,10 +214,16 @@ def summarize_trials(job_dir: Path) -> list[TrialSummary]:
 
         try:
             score = parse_reward(child)
+            metrics = parse_trajectory_metrics(child)
         except Exception:
-            continue
-
-        metrics = parse_trajectory_metrics(child)
+            result_path = child / "result.json"
+            if not result_path.exists():
+                continue
+            payload = json.loads(result_path.read_text(encoding="utf-8-sig"))
+            if not payload.get("exception_info"):
+                continue
+            score = 0.0
+            metrics = parse_trial_result_metrics(child)
         trials.append(
             TrialSummary(
                 name=child.name,
@@ -220,11 +275,54 @@ def sanitize_tsv(value: str) -> str:
 
 def ensure_results_header(path: Path) -> None:
     header = (
-        "commit\tmodel_profile\tavg_score\tpassed\ttask_scores\tavg_turns\t"
+        "commit\tmodel_profile\tbenchmark_scope\tavg_score\tpassed\ttask_scores\tavg_turns\t"
         "avg_input_tokens\tavg_output_tokens\tcost_usd\tstatus\tdescription"
     )
     if not path.exists() or not path.read_text(encoding="utf-8").strip():
         path.write_text(header + "\n", encoding="utf-8")
+
+
+def ensure_results_detailed_header(path: Path) -> None:
+    header = (
+        "commit\tmodel_profile\tbenchmark_scope\tjob_name\ttrial_name\ttask_name\t"
+        "score\tturns\tinput_tokens\toutput_tokens\tcost_usd\tstatus\tdescription"
+    )
+    if not path.exists() or not path.read_text(encoding="utf-8").strip():
+        path.write_text(header + "\n", encoding="utf-8")
+
+
+def append_detailed_rows(
+    results_detailed_path: Path,
+    root: Path,
+    model_profile: str,
+    benchmark_scope: str,
+    job_name: str,
+    status: str,
+    description: str,
+    trials: list[TrialSummary],
+) -> None:
+    ensure_results_detailed_header(results_detailed_path)
+
+    commit = git_commit_short(root)
+    with results_detailed_path.open("a", encoding="utf-8", newline="") as f:
+        for trial in trials:
+            task_name = trial.name.split("__", 1)[0]
+            row = [
+                commit,
+                model_profile,
+                benchmark_scope,
+                job_name,
+                trial.name,
+                task_name,
+                f"{trial.score:.6f}",
+                "" if trial.turns is None else f"{trial.turns:.2f}",
+                "" if trial.input_tokens is None else f"{trial.input_tokens:.2f}",
+                "" if trial.output_tokens is None else f"{trial.output_tokens:.2f}",
+                "" if trial.cost_usd is None else f"{trial.cost_usd:.6f}",
+                sanitize_tsv(status),
+                sanitize_tsv(description),
+            ]
+            f.write("\t".join(row) + "\n")
 
 
 def append_result_row(
@@ -241,10 +339,12 @@ def append_result_row(
     avg_score = sum(t.score for t in trials) / len(trials)
     passed_count = sum(1 for t in trials if t.score >= pass_threshold)
     task_scores = ";".join(f"{t.name}={t.score:.4f}" for t in trials)
+    benchmark_scope = "full" if len(trials) > 1 else "smoke"
 
     row = [
         git_commit_short(root),
         model_profile,
+        benchmark_scope,
         f"{avg_score:.6f}",
         f"{passed_count}/{len(trials)}",
         task_scores,
@@ -266,29 +366,45 @@ def main() -> None:
     args = parse_args()
     job_dir = args.job_dir or latest_job_dir(args.jobs_dir)
     trials = summarize_trials(job_dir)
+    model_profile = args.model_profile or default_model_profile()
+    benchmark_scope = "full" if len(trials) > 1 else "smoke"
+    description = f"{args.description} | job={job_dir.name}"
     line = append_result_row(
         results_path=args.results_path,
         root=ROOT,
-        model_profile=args.model_profile or default_model_profile(),
+        model_profile=model_profile,
         pass_threshold=args.pass_threshold,
         status=args.status,
-        description=f"{args.description} | job={job_dir.name}",
+        description=description,
         trials=trials,
     )
-    subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "generate_progress_chart.py"),
-            "--results-path",
-            str(args.results_path),
-            "--png-path",
-            str(args.progress_png),
-            "--svg-path",
-            str(args.progress_svg),
-        ],
-        cwd=ROOT,
-        check=True,
+    append_detailed_rows(
+        results_detailed_path=args.results_detailed_path,
+        root=ROOT,
+        model_profile=model_profile,
+        benchmark_scope=benchmark_scope,
+        job_name=job_dir.name,
+        status=args.status,
+        description=description,
+        trials=trials,
     )
+    if not args.skip_visuals:
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "generate_progress_chart.py"),
+                "--results-path",
+                str(args.results_path),
+                "--results-detailed-path",
+                str(args.results_detailed_path),
+                "--png-path",
+                str(args.progress_png),
+                "--svg-path",
+                str(args.progress_svg),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
     print(f"Logged results row:\n{line}")
 
 

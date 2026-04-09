@@ -4,10 +4,16 @@
 __pycache__/
 *.pyc
 jobs/
+logs/
+analysis/
+experiments/
 run.log
 results.tsv
+results_detailed.tsv
 data/generated/
 _reference_autoagent/
 _reference_harbor/
 
 output/
+artifacts/plots/
+artifacts/reports/benchmark_dashboard.md

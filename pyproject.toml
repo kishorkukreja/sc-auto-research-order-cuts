@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "supply-chain-autoagent"
 version = "0.1.0"
 description = "AutoAgent-style harness for supply-chain order cut optimisation"
