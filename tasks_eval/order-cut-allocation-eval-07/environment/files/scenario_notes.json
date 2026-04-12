@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-07",
+  "title": "Promo mix shift to premium (Eval)",
+  "description": "Premium SKUs receive heavy promotional pressure from RET_A and RET_D in the back half. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8007
+}

@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-02",
+  "title": "Dual promo conflict (Eval)",
+  "description": "RET_A and RET_C have overlapping promotions that force sharper trade-offs in weeks 14-15. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8002
+}

@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-08",
+  "title": "Late-horizon retailer launch (Eval)",
+  "description": "RET_C has a late launch event on selected SKUs just as capacity tightens in week 16. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8008
+}

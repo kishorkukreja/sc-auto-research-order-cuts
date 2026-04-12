@@ -18,6 +18,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=1, help="Benchmark concurrency passed to auto_iterate.py.")
     parser.add_argument("--task-path", default="tasks", help="Task directory to use for benchmark runs.")
     parser.add_argument("--benchmark-split", default="dev", help="Benchmark split label used for analysis/logging.")
+    parser.add_argument("--eval-task-path", default="", help="Optional held-out eval task directory.")
+    parser.add_argument("--eval-every", type=int, default=0, help="Run an eval benchmark every N dev iterations. Disabled when 0.")
+    parser.add_argument("--eval-concurrency", type=int, default=1, help="Benchmark concurrency for eval checkpoints.")
+    parser.add_argument("--stop-on-eval-crash", action="store_true", help="Stop the outer loop if an eval checkpoint fails.")
     parser.add_argument("--analysis-dir", type=Path, default=ROOT / "analysis")
     parser.add_argument("--results-path", type=Path, default=ROOT / "results.tsv")
     parser.add_argument("--jobs-dir", type=Path, default=ROOT / "jobs")
@@ -104,8 +108,41 @@ def main() -> None:
             print(f"Iteration {iteration} crashed.")
             if args.stop_on_crash:
                 raise
+
+        if (
+            not args.patch_only
+            and args.eval_task_path
+            and args.eval_every > 0
+            and iteration % args.eval_every == 0
+        ):
+            eval_job_name = f"{args.proposal_prefix}-eval-{iteration:02d}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            try:
+                run(
+                    [
+                        sys.executable,
+                        "scripts/run_benchmark.py",
+                        "--task-path",
+                        args.eval_task_path,
+                        "--concurrency",
+                        str(args.eval_concurrency),
+                        "--benchmark-split",
+                        "eval",
+                        "--job-name",
+                        eval_job_name,
+                        "--status",
+                        "eval",
+                        "--description",
+                        f"{args.description_prefix} eval checkpoint after dev iteration {iteration}",
+                    ]
+                )
+            except subprocess.CalledProcessError:
+                print(f"Eval checkpoint after iteration {iteration} crashed.")
+                if args.stop_on_eval_crash:
+                    raise
         if not args.patch_only:
-            run([sys.executable, "scripts/generate_progress_chart.py"])
+            run([sys.executable, "scripts/generate_progress_chart.py", "--benchmark-split", args.benchmark_split])
+            if args.eval_task_path:
+                run([sys.executable, "scripts/generate_progress_chart.py", "--benchmark-split", "eval"])
 
     print("\nOuter loop completed.")
 

@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-04",
+  "title": "High-margin premium scarcity (Eval)",
+  "description": "Premium SKUs are margin-critical and selected RET_D rows are launching into a sparse week 16. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8004
+}

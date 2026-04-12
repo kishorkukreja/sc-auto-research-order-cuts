@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-03",
+  "title": "Capacity drop in week 15 (Eval)",
+  "description": "A line outage in week 15 creates a one-week shock after a relatively healthy start. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8003
+}

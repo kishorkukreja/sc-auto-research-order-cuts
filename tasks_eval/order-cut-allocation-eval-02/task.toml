@@ -1,0 +1,35 @@
+schema_version = "1.1"
+
+[task]
+name = "supply-chain/order-cut-allocation-eval-02"
+description = "RET_A and RET_C have overlapping promotions that force sharper trade-offs in weeks 14-15. This held-out eval variant uses a different hidden random seed and a shifted shortage profile."
+authors = []
+keywords = ["supply-chain", "allocation", "order-cuts"]
+
+[metadata]
+author_name = "OpenAI Codex"
+author_email = "noreply@example.com"
+difficulty = "medium"
+category = "supply-chain"
+tags = ["allocation", "seasonal-peak", "order-cut-optimisation"]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 240.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

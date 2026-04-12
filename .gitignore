@@ -18,3 +18,4 @@ _reference_harbor/
 output/
 artifacts/plots/
 artifacts/reports/benchmark_dashboard.md
+artifacts/reports/benchmark_dashboard-*.md

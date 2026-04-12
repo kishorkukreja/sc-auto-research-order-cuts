@@ -137,8 +137,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def default_progress_path(kind: str, benchmark_split: str, ext: str) -> str:
-    return f"artifacts/plots/{kind}-{benchmark_split}.{ext}"
+def default_progress_path(kind: str, ext: str) -> str:
+    return f"artifacts/plots/{kind}.{ext}"
 
 
 def run_command(command: list[str], *, stdout_path: Path | None = None) -> None:
@@ -232,9 +232,9 @@ def main() -> None:
         "--description",
         args.description,
         "--progress-png",
-        args.progress_png or default_progress_path("progress", args.benchmark_split, "png"),
+        args.progress_png or default_progress_path("progress", "png"),
         "--progress-svg",
-        args.progress_svg or default_progress_path("progress", args.benchmark_split, "svg"),
+        args.progress_svg or default_progress_path("progress", "svg"),
     ]
     run_command(log_cmd)
 

@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-09",
+  "title": "Two weak weeks then recovery (Eval)",
+  "description": "Weeks 13-14 are severely short, then production recovers enough to catch up partially. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8009
+}

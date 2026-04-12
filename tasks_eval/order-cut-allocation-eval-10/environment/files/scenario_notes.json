@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-10",
+  "title": "High-volume low-margin trap (Eval)",
+  "description": "Large low-margin orders can soak up capacity unless the agent follows commercial weighting correctly. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8010
+}

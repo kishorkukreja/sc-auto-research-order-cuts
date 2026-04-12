@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-01",
+  "title": "Promo protection on RET_A (Eval)",
+  "description": "RET_A runs a major summer feature in weeks 13-14 while capacity is tight in both weeks. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8001
+}

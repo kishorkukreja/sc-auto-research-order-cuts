@@ -1,0 +1,6 @@
+{
+  "slug": "order-cut-allocation-eval-06",
+  "title": "Strategic account protection (Eval)",
+  "description": "RET_B is a strategic customer and needs to be protected during a broad capacity squeeze. This held-out eval variant uses a different hidden random seed and a shifted shortage profile.",
+  "seed": 8006
+}
