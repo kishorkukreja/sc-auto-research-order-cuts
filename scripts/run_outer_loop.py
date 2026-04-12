@@ -16,6 +16,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--iterations", type=int, default=5, help="Number of outer-loop iterations.")
     parser.add_argument("--concurrency", type=int, default=1, help="Benchmark concurrency passed to auto_iterate.py.")
+    parser.add_argument("--task-path", default="tasks", help="Task directory to use for benchmark runs.")
+    parser.add_argument("--benchmark-split", default="dev", help="Benchmark split label used for analysis/logging.")
     parser.add_argument("--analysis-dir", type=Path, default=ROOT / "analysis")
     parser.add_argument("--results-path", type=Path, default=ROOT / "results.tsv")
     parser.add_argument("--jobs-dir", type=Path, default=ROOT / "jobs")
@@ -51,6 +53,8 @@ def main() -> None:
                 str(args.jobs_dir),
                 "--results-path",
                 str(args.results_path),
+                "--benchmark-split",
+                args.benchmark_split,
                 "--output-dir",
                 str(args.analysis_dir),
             ]
@@ -80,6 +84,10 @@ def main() -> None:
             str(analysis_json),
             "--concurrency",
             str(args.concurrency),
+            "--benchmark-split",
+            args.benchmark_split,
+            "--task-path",
+            args.task_path,
             "--job-name",
             job_name,
             "--description",

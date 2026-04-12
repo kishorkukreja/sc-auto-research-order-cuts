@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         help="results.tsv used to infer the latest full benchmark job when --job-dir is omitted.",
     )
     parser.add_argument(
+        "--benchmark-split",
+        default="dev",
+        help="Benchmark split to analyze when inferring the latest job.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -61,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def infer_latest_full_job(results_path: Path, jobs_dir: Path) -> Path:
+def infer_latest_full_job(results_path: Path, jobs_dir: Path, benchmark_split: str) -> Path:
     if results_path.exists():
         lines = results_path.read_text(encoding="utf-8-sig").splitlines()
         if len(lines) >= 2:
@@ -71,6 +76,7 @@ def infer_latest_full_job(results_path: Path, jobs_dir: Path) -> Path:
                 row
                 for row in rows
                 if row.get("benchmark_scope", "full") == "full"
+                and row.get("benchmark_split", "dev") == benchmark_split
                 and row.get("avg_score", "").strip()
                 and row.get("status", "").strip().lower() != "crash"
             ]
@@ -431,7 +437,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
-    job_dir = args.job_dir or infer_latest_full_job(args.results_path, args.jobs_dir)
+    job_dir = args.job_dir or infer_latest_full_job(args.results_path, args.jobs_dir, args.benchmark_split)
     payload = summarize_job(job_dir)
     output_dir = args.output_dir / job_dir.name
     json_path, md_path = write_outputs(output_dir, payload)

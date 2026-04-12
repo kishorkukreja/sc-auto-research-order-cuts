@@ -16,6 +16,7 @@ DEFAULT_RESULTS_DETAILED_PATH = ROOT / "results_detailed.tsv"
 DEFAULT_JOBS_DIR = ROOT / "jobs"
 DEFAULT_PASS_THRESHOLD = 0.80
 DEFAULT_MODEL_PROFILE = ""
+DEFAULT_BENCHMARK_SPLIT = "dev"
 DEFAULT_PROGRESS_PNG = ROOT / "artifacts" / "plots" / "progress.png"
 DEFAULT_PROGRESS_SVG = ROOT / "artifacts" / "plots" / "progress.svg"
 
@@ -63,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         "--model-profile",
         default=DEFAULT_MODEL_PROFILE,
         help="Model profile label written into results.tsv",
+    )
+    parser.add_argument(
+        "--benchmark-split",
+        default=DEFAULT_BENCHMARK_SPLIT,
+        help="Benchmark split label written into results.tsv/results_detailed.tsv (for example: dev, eval).",
     )
     parser.add_argument(
         "--status",
@@ -275,26 +281,65 @@ def sanitize_tsv(value: str) -> str:
 
 def ensure_results_header(path: Path) -> None:
     header = (
-        "commit\tmodel_profile\tbenchmark_scope\tavg_score\tpassed\ttask_scores\tavg_turns\t"
+        "commit\tmodel_profile\tbenchmark_split\tbenchmark_scope\tavg_score\tpassed\ttask_scores\tavg_turns\t"
         "avg_input_tokens\tavg_output_tokens\tcost_usd\tstatus\tdescription"
     )
     if not path.exists() or not path.read_text(encoding="utf-8").strip():
         path.write_text(header + "\n", encoding="utf-8")
+        return
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if not lines:
+        path.write_text(header + "\n", encoding="utf-8")
+        return
+    if lines[0].split("\t") == header.split("\t"):
+        return
+    old_header = lines[0].split("\t")
+    if "benchmark_split" in old_header:
+        return
+    upgraded = [header]
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            parts.insert(2, "dev")
+        upgraded.append("\t".join(parts))
+    path.write_text("\n".join(upgraded) + "\n", encoding="utf-8")
 
 
 def ensure_results_detailed_header(path: Path) -> None:
     header = (
-        "commit\tmodel_profile\tbenchmark_scope\tjob_name\ttrial_name\ttask_name\t"
+        "commit\tmodel_profile\tbenchmark_split\tbenchmark_scope\tjob_name\ttrial_name\ttask_name\t"
         "score\tturns\tinput_tokens\toutput_tokens\tcost_usd\tstatus\tdescription"
     )
     if not path.exists() or not path.read_text(encoding="utf-8").strip():
         path.write_text(header + "\n", encoding="utf-8")
+        return
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if not lines:
+        path.write_text(header + "\n", encoding="utf-8")
+        return
+    if lines[0].split("\t") == header.split("\t"):
+        return
+    old_header = lines[0].split("\t")
+    if "benchmark_split" in old_header:
+        return
+    upgraded = [header]
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            parts.insert(2, "dev")
+        upgraded.append("\t".join(parts))
+    path.write_text("\n".join(upgraded) + "\n", encoding="utf-8")
 
 
 def append_detailed_rows(
     results_detailed_path: Path,
     root: Path,
     model_profile: str,
+    benchmark_split: str,
     benchmark_scope: str,
     job_name: str,
     status: str,
@@ -310,6 +355,7 @@ def append_detailed_rows(
             row = [
                 commit,
                 model_profile,
+                benchmark_split,
                 benchmark_scope,
                 job_name,
                 trial.name,
@@ -329,6 +375,7 @@ def append_result_row(
     results_path: Path,
     root: Path,
     model_profile: str,
+    benchmark_split: str,
     pass_threshold: float,
     status: str,
     description: str,
@@ -344,6 +391,7 @@ def append_result_row(
     row = [
         git_commit_short(root),
         model_profile,
+        benchmark_split,
         benchmark_scope,
         f"{avg_score:.6f}",
         f"{passed_count}/{len(trials)}",
@@ -373,6 +421,7 @@ def main() -> None:
         results_path=args.results_path,
         root=ROOT,
         model_profile=model_profile,
+        benchmark_split=args.benchmark_split,
         pass_threshold=args.pass_threshold,
         status=args.status,
         description=description,
@@ -382,6 +431,7 @@ def main() -> None:
         results_detailed_path=args.results_detailed_path,
         root=ROOT,
         model_profile=model_profile,
+        benchmark_split=args.benchmark_split,
         benchmark_scope=benchmark_scope,
         job_name=job_dir.name,
         status=args.status,
@@ -397,6 +447,8 @@ def main() -> None:
                 str(args.results_path),
                 "--results-detailed-path",
                 str(args.results_detailed_path),
+                "--benchmark-split",
+                args.benchmark_split,
                 "--png-path",
                 str(args.progress_png),
                 "--svg-path",

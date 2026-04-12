@@ -96,10 +96,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-json", type=Path, help="Optional run_analysis.json path. Defaults to proposal sibling.")
     parser.add_argument("--results-path", type=Path, default=RESULTS_PATH)
     parser.add_argument("--concurrency", type=int, default=2)
+    parser.add_argument("--task-path", default="tasks")
     parser.add_argument("--job-name", default="")
     parser.add_argument("--output-dir", type=Path, default=EXPERIMENTS_DIR)
     parser.add_argument("--status", default="candidate")
     parser.add_argument("--description", default="auto candidate iteration")
+    parser.add_argument("--benchmark-split", default="dev")
     parser.add_argument("--patch-only", action="store_true", help="Generate and apply the candidate patch but do not benchmark it.")
     parser.add_argument("--keep-on-tie", action="store_true", help="Keep a candidate when primary/secondary metrics tie and efficiency improves.")
     parser.add_argument("--initialize-incumbent-from-current", action="store_true", help="Initialize experiments/incumbent/agent.py from the current working agent before iterating.")
@@ -127,8 +129,14 @@ def write_results(path: Path, fieldnames: list[str], rows: list[dict[str, str]])
         writer.writerows(rows)
 
 
-def current_best_full_run(rows: list[dict[str, str]]) -> ResultRow | None:
-    candidates = [ResultRow(row) for row in rows if row.get("benchmark_scope") == "full" and row.get("status") != "discard"]
+def current_best_full_run(rows: list[dict[str, str]], benchmark_split: str) -> ResultRow | None:
+    candidates = [
+        ResultRow(row)
+        for row in rows
+        if row.get("benchmark_scope") == "full"
+        and row.get("benchmark_split", "dev") == benchmark_split
+        and row.get("status") != "discard"
+    ]
     if not candidates:
         return None
     best = candidates[0]
@@ -312,15 +320,19 @@ def remove_job_dir(job_name: str) -> None:
         shutil.rmtree(job_dir)
 
 
-def run_benchmark(job_name: str, description: str, concurrency: int, status: str) -> None:
+def run_benchmark(job_name: str, description: str, concurrency: int, status: str, benchmark_split: str, task_path: str) -> None:
     remove_job_dir(job_name)
     cmd = [
         sys.executable,
         "scripts/run_benchmark.py",
+        "--task-path",
+        task_path,
         "--concurrency",
         str(concurrency),
         "--job-name",
         job_name,
+        "--benchmark-split",
+        benchmark_split,
         "--status",
         status,
         "--description",
@@ -331,7 +343,7 @@ def run_benchmark(job_name: str, description: str, concurrency: int, status: str
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
-def ensure_logged_row(job_name: str, status: str, description: str) -> None:
+def ensure_logged_row(job_name: str, status: str, description: str, benchmark_split: str) -> None:
     job_dir = ROOT / "jobs" / job_name
     if not job_dir.exists():
         raise FileNotFoundError(f"Job directory does not exist: {job_dir}")
@@ -345,6 +357,8 @@ def ensure_logged_row(job_name: str, status: str, description: str) -> None:
             str(RESULTS_PATH),
             "--results-detailed-path",
             str(ROOT / "results_detailed.tsv"),
+            "--benchmark-split",
+            benchmark_split,
             "--status",
             status,
             "--description",
@@ -376,9 +390,9 @@ def update_row_status(results_path: Path, job_name: str, new_status: str, extra_
     write_results(results_path, fieldnames, rows)
 
 
-def append_crash_row(results_path: Path, job_name: str, description: str, extra_note: str = "") -> None:
+def append_crash_row(results_path: Path, job_name: str, description: str, benchmark_split: str, extra_note: str = "") -> None:
     header = (
-        "commit\tmodel_profile\tbenchmark_scope\tavg_score\tpassed\ttask_scores\tavg_turns\t"
+        "commit\tmodel_profile\tbenchmark_split\tbenchmark_scope\tavg_score\tpassed\ttask_scores\tavg_turns\t"
         "avg_input_tokens\tavg_output_tokens\tcost_usd\tstatus\tdescription"
     )
     if not results_path.exists() or not results_path.read_text(encoding="utf-8-sig").strip():
@@ -412,6 +426,7 @@ def append_crash_row(results_path: Path, job_name: str, description: str, extra_
     row = [
         commit,
         model_profile,
+        benchmark_split,
         "full",
         "",
         "",
@@ -444,7 +459,7 @@ def main() -> None:
     analysis = load_json(analysis_json) if analysis_json.exists() else None
 
     fieldnames, rows = load_results(args.results_path)
-    incumbent = current_best_full_run(rows)
+    incumbent = current_best_full_run(rows, args.benchmark_split)
 
     live_agent = AGENT_PATH.read_text(encoding="utf-8")
     if args.initialize_incumbent_from_current or not INCUMBENT_AGENT_PATH.exists():
@@ -503,6 +518,7 @@ def main() -> None:
             args.results_path,
             job_name,
             args.description,
+            args.benchmark_split,
             extra_note=f"compile_error={type(exc).__name__}",
         )
         (exp_dir / "decision.json").write_text(
@@ -527,10 +543,23 @@ def main() -> None:
     description = f"{args.description} | proposal={proposal.get('proposal_id', 'unknown')}"
     try:
         docker_preflight(timeout_sec=args.docker_timeout_sec)
-        run_benchmark(job_name=job_name, description=description, concurrency=args.concurrency, status=args.status)
+        run_benchmark(
+            job_name=job_name,
+            description=description,
+            concurrency=args.concurrency,
+            status=args.status,
+            benchmark_split=args.benchmark_split,
+            task_path=args.task_path,
+        )
     except Exception as exc:
         shutil.copyfile(INCUMBENT_AGENT_PATH, AGENT_PATH)
-        append_crash_row(args.results_path, job_name, description, extra_note=f"error={type(exc).__name__}")
+        append_crash_row(
+            args.results_path,
+            job_name,
+            description,
+            args.benchmark_split,
+            extra_note=f"error={type(exc).__name__}",
+        )
         (exp_dir / "decision.json").write_text(
             json.dumps(
                 {
@@ -548,7 +577,12 @@ def main() -> None:
     try:
         _, cand_row_raw = find_row_by_job(rows, job_name)
     except RuntimeError:
-        ensure_logged_row(job_name=job_name, status=args.status, description=description)
+        ensure_logged_row(
+            job_name=job_name,
+            status=args.status,
+            description=description,
+            benchmark_split=args.benchmark_split,
+        )
         fieldnames, rows = load_results(args.results_path)
         _, cand_row_raw = find_row_by_job(rows, job_name)
     candidate = ResultRow(cand_row_raw)

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import argparse
 import json
 import math
 import shutil
@@ -11,6 +12,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS_DIR = ROOT / "tasks"
+TASKS_EVAL_DIR = ROOT / "tasks_eval"
 DATA_DIR = ROOT / "data" / "generated"
 
 SKUS = [f"SKU_{i:02d}" for i in range(1, 13)]
@@ -127,6 +129,45 @@ SCENARIOS = [
         "future_promos": [("RET_D", "ALL", 14, 14, "DISPLAY", 1.22)],
     },
 ]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate dev and/or eval benchmark task suites."
+    )
+    parser.add_argument(
+        "--split",
+        choices=["dev", "eval", "all"],
+        default="all",
+        help="Which benchmark split to generate.",
+    )
+    parser.add_argument("--dev-tasks-dir", type=Path, default=TASKS_DIR)
+    parser.add_argument("--eval-tasks-dir", type=Path, default=TASKS_EVAL_DIR)
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    return parser.parse_args()
+
+
+def build_eval_scenarios() -> list[dict]:
+    eval_scenarios: list[dict] = []
+    for idx, scenario in enumerate(SCENARIOS, start=1):
+        adjusted = dict(scenario)
+        adjusted["slug"] = f"order-cut-allocation-eval-{idx:02d}"
+        adjusted["seed"] = int(scenario["seed"]) + 7000
+        adjusted["title"] = f"{scenario['title']} (Eval)"
+        adjusted["description"] = (
+            scenario["description"]
+            + " This held-out eval variant uses a different hidden random seed and a shifted shortage profile."
+        )
+        adjusted["future_capacity_factors"] = [
+            round(float(min(0.98, max(0.60, factor + delta))), 2)
+            for factor, delta in zip(
+                scenario["future_capacity_factors"],
+                [0.03, -0.02, 0.01, -0.01],
+                strict=True,
+            )
+        ]
+        eval_scenarios.append(adjusted)
+    return eval_scenarios
 
 
 TASK_TOML = '''schema_version = "1.1"
@@ -677,20 +718,26 @@ def write_task(task_root: Path, scenario: dict, history: pd.DataFrame, future: p
     )
 
 
-def main() -> None:
-    TASKS_DIR.mkdir(exist_ok=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def write_split(
+    *,
+    split_name: str,
+    scenarios: list[dict],
+    tasks_dir: Path,
+    data_dir: Path,
+) -> None:
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = []
-    for scenario in SCENARIOS:
-        task_root = TASKS_DIR / scenario["slug"]
+    for scenario in scenarios:
+        task_root = tasks_dir / scenario["slug"]
         if task_root.exists():
             shutil.rmtree(task_root)
 
         history, future, capacity, promo, holdout = build_dataset(scenario)
         write_task(task_root, scenario, history, future, capacity, promo, holdout)
 
-        scenario_dir = DATA_DIR / scenario["slug"]
+        scenario_dir = data_dir / scenario["slug"]
         if scenario_dir.exists():
             shutil.rmtree(scenario_dir)
         scenario_dir.mkdir(parents=True, exist_ok=True)
@@ -702,6 +749,7 @@ def main() -> None:
 
         manifest.append(
             {
+                "benchmark_split": split_name,
                 "task_name": f"supply-chain/{scenario['slug']}",
                 "slug": scenario["slug"],
                 "title": scenario["title"],
@@ -710,11 +758,31 @@ def main() -> None:
             }
         )
 
-    (DATA_DIR / "benchmark_manifest.json").write_text(
+    (data_dir / "benchmark_manifest.json").write_text(
         json.dumps(manifest, indent=2),
         encoding="utf-8",
     )
-    print(f"Generated {len(manifest)} tasks in {TASKS_DIR}")
+    print(f"Generated {len(manifest)} {split_name} tasks in {tasks_dir}")
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.split in {"dev", "all"}:
+        write_split(
+            split_name="dev",
+            scenarios=SCENARIOS,
+            tasks_dir=args.dev_tasks_dir,
+            data_dir=args.data_dir / "dev",
+        )
+
+    if args.split in {"eval", "all"}:
+        write_split(
+            split_name="eval",
+            scenarios=build_eval_scenarios(),
+            tasks_dir=args.eval_tasks_dir,
+            data_dir=args.data_dir / "eval",
+        )
 
 
 if __name__ == "__main__":

@@ -105,6 +105,11 @@ def parse_args() -> argparse.Namespace:
         help="model_profile value written to results.tsv. If omitted, inferred from env vars.",
     )
     parser.add_argument(
+        "--benchmark-split",
+        default="dev",
+        help="Benchmark split label written to results.tsv/results_detailed.tsv.",
+    )
+    parser.add_argument(
         "--status",
         default="run",
         help="status value written to results.tsv",
@@ -121,15 +126,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--progress-png",
-        default="artifacts/plots/progress.png",
+        default="",
         help="PNG path for the auto-generated progress chart",
     )
     parser.add_argument(
         "--progress-svg",
-        default="artifacts/plots/progress.svg",
+        default="",
         help="SVG path for the auto-generated progress chart",
     )
     return parser.parse_args()
+
+
+def default_progress_path(kind: str, benchmark_split: str, ext: str) -> str:
+    return f"artifacts/plots/{kind}-{benchmark_split}.{ext}"
 
 
 def run_command(command: list[str], *, stdout_path: Path | None = None) -> None:
@@ -216,14 +225,16 @@ def main() -> None:
         str(args.pass_threshold),
         "--model-profile",
         args.model_profile or default_model_profile(),
+        "--benchmark-split",
+        args.benchmark_split,
         "--status",
         args.status,
         "--description",
         args.description,
         "--progress-png",
-        args.progress_png,
+        args.progress_png or default_progress_path("progress", args.benchmark_split, "png"),
         "--progress-svg",
-        args.progress_svg,
+        args.progress_svg or default_progress_path("progress", args.benchmark_split, "svg"),
     ]
     run_command(log_cmd)
 

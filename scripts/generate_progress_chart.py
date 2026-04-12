@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--results-path", type=Path, default=DEFAULT_RESULTS_PATH)
     parser.add_argument("--results-detailed-path", type=Path, default=DEFAULT_RESULTS_DETAILED_PATH)
+    parser.add_argument(
+        "--benchmark-split",
+        default="",
+        help="Optional benchmark split filter (for example: dev or eval).",
+    )
     parser.add_argument("--png-path", type=Path, default=DEFAULT_PNG_PATH)
     parser.add_argument("--svg-path", type=Path, default=DEFAULT_SVG_PATH)
     parser.add_argument("--best-png-path", type=Path, default=DEFAULT_BEST_PNG_PATH)
@@ -66,6 +71,9 @@ def load_results(results_path: Path) -> pd.DataFrame:
     if df.empty:
         return df
 
+    if "benchmark_split" not in df.columns:
+        df["benchmark_split"] = "dev"
+
     if "benchmark_scope" not in df.columns:
         passed_text = df.get("passed", pd.Series(dtype=str)).fillna("").astype(str)
         denominator = pd.to_numeric(passed_text.str.split("/", n=1, expand=True).get(1), errors="coerce")
@@ -96,6 +104,8 @@ def load_detailed(results_detailed_path: Path) -> pd.DataFrame:
     df = pd.read_csv(results_detailed_path, sep="\t", encoding="utf-8-sig")
     if df.empty:
         return df
+    if "benchmark_split" not in df.columns:
+        df["benchmark_split"] = "dev"
     for column in ["score", "turns", "input_tokens", "output_tokens", "cost_usd"]:
         df[column] = pd.to_numeric(df.get(column), errors="coerce")
     return df
@@ -350,33 +360,53 @@ def write_dashboard(df_full: pd.DataFrame, detailed: pd.DataFrame, path: Path) -
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def split_output_path(path: Path, benchmark_split: str) -> Path:
+    if not benchmark_split:
+        return path
+    return path.with_name(f"{path.stem}-{benchmark_split}{path.suffix}")
+
+
 def main() -> None:
     args = parse_args()
     df = load_results(args.results_path)
     detailed = load_detailed(args.results_detailed_path)
+    if args.benchmark_split:
+        df = df[df["benchmark_split"] == args.benchmark_split].copy()
+        detailed = detailed[detailed["benchmark_split"] == args.benchmark_split].copy()
+
+    png_path = split_output_path(args.png_path, args.benchmark_split)
+    svg_path = split_output_path(args.svg_path, args.benchmark_split)
+    best_png_path = split_output_path(args.best_png_path, args.benchmark_split)
+    best_svg_path = split_output_path(args.best_svg_path, args.benchmark_split)
+    efficiency_png_path = split_output_path(args.efficiency_png_path, args.benchmark_split)
+    efficiency_svg_path = split_output_path(args.efficiency_svg_path, args.benchmark_split)
+    delta_png_path = split_output_path(args.delta_png_path, args.benchmark_split)
+    delta_svg_path = split_output_path(args.delta_svg_path, args.benchmark_split)
+    dashboard_md_path = split_output_path(args.dashboard_md_path, args.benchmark_split)
+
     df_full = df[df["benchmark_scope"] == "full"].copy() if not df.empty else pd.DataFrame()
     if not df_full.empty:
         df_full["run_index"] = np.arange(1, len(df_full) + 1)
 
     if df_full.empty:
-        render_placeholder(args.png_path, args.svg_path, "No full benchmark runs yet", "Run scripts/run_benchmark.py to populate results.tsv.")
-        render_placeholder(args.best_png_path, args.best_svg_path, "No best-so-far view yet", "Need at least one full benchmark run.")
-        render_placeholder(args.efficiency_png_path, args.efficiency_svg_path, "No efficiency view yet", "Need at least one full benchmark run with token metrics.")
-        render_placeholder(args.delta_png_path, args.delta_svg_path, "No per-task delta view yet", "Need at least two full runs plus results_detailed.tsv.")
-        write_dashboard(df_full, detailed, args.dashboard_md_path)
-        print(f"Wrote {args.png_path} and {args.svg_path}")
+        render_placeholder(png_path, svg_path, "No full benchmark runs yet", "Run scripts/run_benchmark.py to populate results.tsv.")
+        render_placeholder(best_png_path, best_svg_path, "No best-so-far view yet", "Need at least one full benchmark run.")
+        render_placeholder(efficiency_png_path, efficiency_svg_path, "No efficiency view yet", "Need at least one full benchmark run with token metrics.")
+        render_placeholder(delta_png_path, delta_svg_path, "No per-task delta view yet", "Need at least two full runs plus results_detailed.tsv.")
+        write_dashboard(df_full, detailed, dashboard_md_path)
+        print(f"Wrote {png_path} and {svg_path}")
         return
 
-    render_progress(df_full, args.png_path, args.svg_path)
-    render_best_so_far(df_full, args.best_png_path, args.best_svg_path)
-    render_efficiency(df_full, args.efficiency_png_path, args.efficiency_svg_path)
+    render_progress(df_full, png_path, svg_path)
+    render_best_so_far(df_full, best_png_path, best_svg_path)
+    render_efficiency(df_full, efficiency_png_path, efficiency_svg_path)
     merged, latest, incumbent = build_per_task_delta(detailed, df_full)
-    render_per_task_delta(merged, latest, incumbent, args.delta_png_path, args.delta_svg_path)
-    write_dashboard(df_full, detailed, args.dashboard_md_path)
+    render_per_task_delta(merged, latest, incumbent, delta_png_path, delta_svg_path)
+    write_dashboard(df_full, detailed, dashboard_md_path)
     print(
         "Wrote "
-        f"{args.png_path}, {args.svg_path}, {args.best_png_path}, {args.best_svg_path}, "
-        f"{args.efficiency_png_path}, {args.efficiency_svg_path}, {args.delta_png_path}, {args.delta_svg_path}, {args.dashboard_md_path}"
+        f"{png_path}, {svg_path}, {best_png_path}, {best_svg_path}, "
+        f"{efficiency_png_path}, {efficiency_svg_path}, {delta_png_path}, {delta_svg_path}, {dashboard_md_path}"
     )
 
 
