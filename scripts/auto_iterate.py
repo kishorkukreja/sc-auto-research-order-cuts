@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import os
@@ -29,6 +30,7 @@ ANALYSIS_DIR = ROOT / "analysis"
 EXPERIMENTS_DIR = ROOT / "experiments"
 INCUMBENT_AGENT_PATH = EXPERIMENTS_DIR / "incumbent" / "agent.py"
 FIXED_BOUNDARY = "# ============================================================================\n# FIXED ADAPTER BOUNDARY: do not modify unless the human explicitly asks.\n"
+EDITABLE_START_TOKEN = "# EDITABLE HARNESS"
 
 if load_dotenv:
     load_dotenv(ROOT / ".env")
@@ -185,28 +187,57 @@ def create_client(provider: str) -> OpenAI:
     )
 
 
-def split_agent_file(text: str) -> tuple[str, str]:
+def split_agent_file(text: str) -> tuple[str, str, str]:
+    if EDITABLE_START_TOKEN not in text:
+        raise RuntimeError("Could not find EDITABLE HARNESS marker in agent.py")
     if FIXED_BOUNDARY not in text:
         raise RuntimeError("Could not find FIXED ADAPTER BOUNDARY in agent.py")
-    prefix, suffix = text.split(FIXED_BOUNDARY, 1)
-    return prefix, FIXED_BOUNDARY + suffix
+    fixed_prefix, editable_and_suffix = text.split(EDITABLE_START_TOKEN, 1)
+    editable_body, fixed_suffix = editable_and_suffix.split(FIXED_BOUNDARY, 1)
+    return fixed_prefix + EDITABLE_START_TOKEN, editable_body, FIXED_BOUNDARY + fixed_suffix
 
 
-def build_patch_prompt(current_prefix: str, proposal: dict[str, Any], analysis: dict[str, Any] | None) -> str:
+def build_patch_prompt(current_editable: str, proposal: dict[str, Any], analysis: dict[str, Any] | None) -> str:
     analysis_summary = json.dumps(analysis or {}, indent=2)
     proposal_summary = json.dumps(proposal, indent=2)
     return f"""
-You are editing the editable prefix of a Harbor agent harness in agent.py.
+You are editing only the editable harness section of a Harbor agent in agent.py.
 
 Task:
 - Improve the harness according to proposal.json.
-- Edit ONLY the editable prefix of agent.py (everything before the FIXED ADAPTER BOUNDARY comment).
+- Edit ONLY the code between the `# EDITABLE HARNESS` marker and the `FIXED ADAPTER BOUNDARY` marker.
+- Do NOT modify imports, module-level compatibility setup, provider adapter wiring, or anything after the fixed boundary.
 - Preserve dual-provider support (OpenAI + OpenRouter).
 - Do not remove the Harbor adapter compatibility assumptions established in the current file.
 - Prefer built-in Python/function tools over repeated shell exploration.
 - Make one concrete, general improvement that is meaningfully different from the current harness.
+- Bias strongly toward improving `build_allocation_plan()` rather than just rewriting prompt wording.
+- Prefer changing the weekly allocation algorithm over changing imports, provider logic, or transcript formatting.
 - Keep the code concise, robust, and syntactically valid.
-- Return ONLY the full replacement editable prefix as plain Python, with no markdown fences.
+- Return ONLY the full replacement editable section as plain Python, with no markdown fences.
+
+Allowed mutation targets:
+- SYSTEM_PROMPT
+- MAX_TURNS
+- summarize_inputs
+- build_allocation_plan
+- validate_allocation_plan
+
+Preferred allocation strategy families to search:
+1. weighted_density_greedy
+2. weighted_proportional
+3. two_stage_promo_protect_then_fill
+4. shortage_regime_switch (moderate shortage vs severe shortage)
+5. retailer_floor_then_density_fill
+
+Important strategy guidance:
+- Always respect weekly capacity.
+- Always emit every visible row exactly once.
+- Use revenue_weight, priority_multiplier, promo_flag, and orders_placed.
+- You may add a small retailer-floor allocation before the main fill if that helps pass count.
+- You may switch strategy based on shortage ratio within a week.
+- Prefer heuristics that improve passed tasks, not only average score.
+- Do not add imports or top-level dependency changes.
 
 Proposal JSON:
 {proposal_summary}
@@ -214,8 +245,8 @@ Proposal JSON:
 Latest analysis JSON:
 {analysis_summary}
 
-Current editable prefix of agent.py:
-{current_prefix}
+Current editable section of agent.py:
+{current_editable}
 """.strip()
 
 
@@ -229,11 +260,23 @@ def clean_model_output(text: str) -> str:
     return cleaned.rstrip() + "\n"
 
 
-def generate_candidate_prefix(current_prefix: str, proposal: dict[str, Any], analysis: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
+def validate_candidate_editable(candidate_editable: str) -> tuple[bool, str]:
+    try:
+        tree = ast.parse(candidate_editable)
+    except SyntaxError as exc:
+        return False, f"syntax_error:{exc}"
+
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False, "top_level_import_not_allowed"
+    return True, "ok"
+
+
+def generate_candidate_prefix(current_editable: str, proposal: dict[str, Any], analysis: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
     provider = get_patch_model_provider()
     model = get_patch_model_name(provider)
     client = create_client(provider)
-    prompt = build_patch_prompt(current_prefix, proposal, analysis)
+    prompt = build_patch_prompt(current_editable, proposal, analysis)
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -408,7 +451,7 @@ def main() -> None:
         INCUMBENT_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
         INCUMBENT_AGENT_PATH.write_text(live_agent, encoding="utf-8")
     incumbent_agent_text = INCUMBENT_AGENT_PATH.read_text(encoding="utf-8")
-    current_prefix, suffix = split_agent_file(incumbent_agent_text)
+    fixed_prefix, current_editable, suffix = split_agent_file(incumbent_agent_text)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     job_name = args.job_name or f"auto-{proposal.get('proposal_id', 'candidate')}-{timestamp}"
@@ -422,11 +465,23 @@ def main() -> None:
     if analysis:
         (exp_dir / "run_analysis.json").write_text(json.dumps(analysis, indent=2), encoding="utf-8")
 
-    candidate_prefix, patch_meta = generate_candidate_prefix(current_prefix, proposal, analysis)
+    candidate_prefix, patch_meta = generate_candidate_prefix(current_editable, proposal, analysis)
     (exp_dir / "candidate_prefix.py").write_text(candidate_prefix, encoding="utf-8")
     (exp_dir / "patch_meta.json").write_text(json.dumps(patch_meta, indent=2), encoding="utf-8")
 
-    if candidate_prefix.strip() == current_prefix.strip():
+    is_valid, validation_reason = validate_candidate_editable(candidate_prefix)
+    if not is_valid:
+        decision = {
+            "decision": "discard",
+            "reason": validation_reason,
+            "proposal": proposal,
+            "patch_meta": patch_meta,
+        }
+        (exp_dir / "decision.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
+        print(f"Decision: DISCARD ({job_name}) because candidate failed validation: {validation_reason}")
+        return
+
+    if candidate_prefix.strip() == current_editable.strip():
         decision = {
             "decision": "discard",
             "reason": "no_change",
@@ -437,7 +492,7 @@ def main() -> None:
         print(f"Decision: DISCARD ({job_name}) because generated candidate matched incumbent.")
         return
 
-    new_agent = candidate_prefix + suffix
+    new_agent = fixed_prefix + candidate_prefix + suffix
     AGENT_PATH.write_text(new_agent, encoding="utf-8")
 
     try:

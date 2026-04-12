@@ -41,8 +41,7 @@ if load_dotenv:
 
 
 # ============================================================================
-# EDITABLE HARNESS — prompt, tools, agent construction
-# ============================================================================
+# EDITABLE HARNESS# EDITABLE HARNESS
 
 SYSTEM_PROMPT = """
 You are a supply-chain allocation agent.
@@ -52,7 +51,7 @@ re-reading large raw CSV files unless a built-in tool fails.
 
 Default workflow:
 1. Call summarize_inputs once.
-2. Call build_allocation_plan once, using the default score-aligned strategy.
+2. Call build_allocation_plan once, using the shortage_regime_switch strategy for adaptive handling.
 3. Call validate_allocation_plan.
 4. If validation is clean, finish with a very short summary.
 5. Use run_shell only as a fallback.
@@ -203,11 +202,13 @@ week_rows = []
 for week, group in future.groupby("week", sort=True):
     total_orders = int(group["orders_placed"].sum())
     cap = int(capacity_map[int(week)])
+    shortage_ratio = total_orders / cap if cap > 0 else 1.0
     week_rows.append({
         "week": int(week),
         "capacity_cases": cap,
         "total_orders": total_orders,
-        "capacity_gap": cap - total_orders,
+        "shortage_ratio": round(shortage_ratio, 3),
+        "regime": "severe" if shortage_ratio >= 1.5 else ("moderate" if shortage_ratio > 1.0 else "surplus"),
     })
 
 top_rows = []
@@ -236,8 +237,8 @@ payload = {
     "scenario_name": scenario.get("scenario_name") or scenario.get("name"),
     "weeks": week_rows,
     "recent_historical_fill_rate": recent_fill,
-    "recommended_strategy": "score_aligned_greedy",
-    "strategy_note": "Prioritize rows by (revenue_weight * priority_multiplier) / orders_placed, then fill within weekly capacity.",
+    "recommended_strategy": "shortage_regime_switch",
+    "strategy_note": "Adaptive: protect promo/priority rows first, then use weighted density fill with regime-based adjustments for severe vs moderate shortages.",
     "top_priority_rows": top_rows,
 }
 print(json.dumps(payload, indent=2))
@@ -245,8 +246,8 @@ print(json.dumps(payload, indent=2))
         return await _exec_python(script)
 
     @function_tool
-    async def build_allocation_plan(strategy: str = "score_aligned_greedy") -> str:
-        """Build /app/output/allocation_plan.json using a score-aligned weekly capacity heuristic."""
+    async def build_allocation_plan(strategy: str = "shortage_regime_switch") -> str:
+        """Build /app/output/allocation_plan.json using shortage-regime-adaptive weighted allocation."""
         script = f"""
 import json
 from pathlib import Path
@@ -260,7 +261,10 @@ capacity = pd.read_csv(capacity_path) if capacity_path.exists() else None
 future["_row_id"] = range(len(future))
 future["priority_weight"] = future["revenue_weight"].fillna(0) * future["priority_multiplier"].fillna(1)
 future["score_per_case"] = future["priority_weight"] / future["orders_placed"].clip(lower=1)
-future["score_per_case"] = future["score_per_case"] * future["promo_flag"].map(lambda x: 1.05 if int(x) else 1.0)
+
+PROMO_BOOST = 1.08
+SEVERE_THRESHOLD = 1.5
+MODERATE_THRESHOLD = 1.0
 
 if capacity is not None and {{"week", "capacity_cases"}} <= set(capacity.columns):
     capacity_map = {{int(row.week): int(row.capacity_cases) for row in capacity.itertuples(index=False)}}
@@ -275,51 +279,97 @@ for week, group in future.groupby("week", sort=True):
     week_int = int(week)
     capacity_cases = int(capacity_map[week_int])
     total_orders = int(group["orders_placed"].sum())
+    shortage_ratio = total_orders / capacity_cases if capacity_cases > 0 else 1.0
 
-    if total_orders <= capacity_cases:
+    if shortage_ratio <= MODERATE_THRESHOLD:
         group["recommended_qty"] = group["orders_placed"].astype(int)
     else:
-        if "{strategy}" == "weighted_proportional":
-            weights = (group["priority_weight"] * group["orders_placed"]).astype(float)
-            if float(weights.sum()) <= 0:
-                weights = group["orders_placed"].astype(float)
-            target = capacity_cases * weights / float(weights.sum())
-            base_alloc = target.clip(upper=group["orders_placed"]).fillna(0).astype(int)
-            remaining = capacity_cases - int(base_alloc.sum())
-            group["recommended_qty"] = base_alloc
-            if remaining > 0:
-                remainder = (target - base_alloc).fillna(0)
-                order = group.assign(_remainder=remainder).sort_values(
-                    ["_remainder", "priority_weight", "promo_flag", "orders_placed"],
-                    ascending=[False, False, False, True],
-                )
-                for idx in order.index:
-                    if remaining <= 0:
-                        break
-                    spare = int(group.at[idx, "orders_placed"] - group.at[idx, "recommended_qty"])
-                    if spare <= 0:
-                        continue
-                    give = min(spare, remaining)
-                    group.at[idx, "recommended_qty"] += give
-                    remaining -= give
-        else:
-            group = group.sort_values(
-                ["score_per_case", "priority_weight", "promo_flag", "orders_placed"],
-                ascending=[False, False, False, True],
-            )
-            remaining = capacity_cases
-            recs = []
-            for row in group.itertuples(index=False):
-                qty = min(int(row.orders_placed), remaining)
-                recs.append(qty)
-                remaining -= qty
-            group["recommended_qty"] = recs
+        promo_mask = group["promo_flag"].astype(int) == 1
+        promo_group = group[promo_mask].copy()
+        non_promo_group = group[~promo_mask].copy()
 
+        promo_demand = int(promo_group["orders_placed"].sum()) if len(promo_group) > 0 else 0
+        promo_protection = min(promo_demand, capacity_cases // 4) if shortage_ratio >= SEVERE_THRESHOLD else promo_demand
+
+        promo_alloc = {{}}
+        if len(promo_group) > 0 and promo_protection > 0:
+            promo_group = promo_group.sort_values("priority_weight", ascending=False)
+            promo_weights = promo_group["priority_weight"].astype(float)
+            if promo_weights.sum() > 0:
+                promo_targets = (promo_protection * promo_weights / promo_weights.sum()).astype(int)
+                promo_alloc = dict(zip(promo_group.index, promo_targets))
+            else:
+                each = promo_protection // len(promo_group)
+                promo_alloc = {{idx: each for idx in promo_group.index}}
+
+        promo_filled = sum(promo_alloc.values())
+        remaining_capacity = capacity_cases - promo_filled
+        non_promo_demand = int(non_promo_group["orders_placed"].sum()) if len(non_promo_group) > 0 else 0
+
+        non_promo_alloc = {{}}
+        if len(non_promo_group) > 0 and remaining_capacity > 0:
+            if shortage_ratio >= SEVERE_THRESHOLD:
+                non_promo_group = non_promo_group.sort_values(
+                    ["score_per_case", "priority_weight", "orders_placed"],
+                    ascending=[False, False, True],
+                )
+                remaining = remaining_capacity
+                for idx in non_promo_group.index:
+                    demand = int(non_promo_group.at[idx, "orders_placed"])
+                    alloc = min(demand, remaining)
+                    non_promo_alloc[idx] = alloc
+                    remaining -= alloc
+            else:
+                non_promo_weights = (non_promo_group["priority_weight"] * non_promo_group["orders_placed"]).astype(float)
+                if non_promo_weights.sum() > 0:
+                    non_promo_targets = (remaining_capacity * non_promo_weights / non_promo_weights.sum()).astype(int)
+                    non_promo_alloc = dict(zip(non_promo_group.index, non_promo_targets))
+                else:
+                    each = remaining_capacity // len(non_promo_group) if len(non_promo_group) > 0 else 0
+                    non_promo_alloc = {{idx: each for idx in non_promo_group.index}}
+
+        final_alloc = {{}}
+        for idx in group.index:
+            alloc = promo_alloc.get(idx, 0) + non_promo_alloc.get(idx, 0)
+            demand = int(group.at[idx, "orders_placed"])
+            final_alloc[idx] = min(alloc, demand)
+
+        allocated = sum(final_alloc.values())
+        deficit = capacity_cases - allocated
+        if deficit > 0:
+            underfilled = [(idx, group.at[idx, "priority_weight"]) for idx in group.index if final_alloc[idx] < group.at[idx, "orders_placed"]]
+            underfilled.sort(key=lambda x: -x[1])
+            for idx, _ in underfilled:
+                if deficit <= 0:
+                    break
+                spare = int(group.at[idx, "orders_placed"] - final_alloc[idx])
+                if spare <= 0:
+                    continue
+                give = min(spare, deficit)
+                final_alloc[idx] += give
+                deficit -= give
+
+        excess = sum(final_alloc.values()) - capacity_cases
+        if excess > 0:
+            overfilled = [(idx, group.at[idx, "priority_weight"]) for idx in group.index if final_alloc[idx] > 0]
+            overfilled.sort(key=lambda x: x[1])
+            for idx, _ in overfilled:
+                if excess <= 0:
+                    break
+                reduce_by = min(excess, final_alloc[idx])
+                final_alloc[idx] -= reduce_by
+                excess -= reduce_by
+
+        group["recommended_qty"] = pd.Series(final_alloc).clip(lower=0).astype(int)
+
+    allocated = int(group["recommended_qty"].sum())
     week_summary.append({{
         "week": week_int,
         "capacity_cases": capacity_cases,
         "total_orders": total_orders,
-        "allocated_cases": int(group["recommended_qty"].sum()),
+        "shortage_ratio": round(shortage_ratio, 3),
+        "allocated_cases": allocated,
+        "utilization": round(allocated / capacity_cases, 3) if capacity_cases > 0 else 0,
     }})
     allocations.append(group)
 
@@ -467,8 +517,6 @@ async def run_task(
     result = await Runner.run(agent, input=instruction, max_turns=MAX_TURNS)
     duration_ms = int((time.time() - t0) * 1000)
     return result, duration_ms
-
-
 # ============================================================================
 # FIXED ADAPTER BOUNDARY: do not modify unless the human explicitly asks.
 # Harbor integration and trajectory serialization live here.

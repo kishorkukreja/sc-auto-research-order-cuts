@@ -8,6 +8,7 @@ logs/
 analysis/
 experiments/
 run.log
+run-*.log
 results.tsv
 results_detailed.tsv
 data/generated/

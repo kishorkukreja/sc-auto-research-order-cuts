@@ -48,6 +48,7 @@ def choose_proposal(analysis: dict[str, Any], explicit_proposal_id: str = "") ->
     focus = analysis.get("proposal_focus")
     avg_turns = analysis.get("avg_turns") or 0
     avg_input_tokens = analysis.get("avg_input_tokens") or 0
+    avg_score = analysis.get("avg_score") or 0
     worst_trials = analysis.get("worst_trials") or []
     worst_names = [trial["task_name"].split("/")[-1] for trial in worst_trials[:3]]
     passed_text = str(analysis.get("passed") or "0/0")
@@ -66,6 +67,15 @@ def choose_proposal(analysis: dict[str, Any], explicit_proposal_id: str = "") ->
         and avg_input_tokens <= 20_000
     ):
         focus = "better_allocation_heuristic"
+
+    if (
+        passed_den > 0
+        and passed_num <= max(0, passed_den - 4)
+        and avg_turns <= 6
+        and avg_input_tokens <= 20_000
+        and avg_score >= 0.75
+    ):
+        focus = "allocation_strategy_search"
 
     if focus == "structured_optimizer_tooling":
         return {
@@ -118,6 +128,37 @@ def choose_proposal(analysis: dict[str, Any], explicit_proposal_id: str = "") ->
                 "Keep if avg_score or passed improves without a large efficiency regression."
             ],
             "risk": "A heuristic that is too narrow could overfit the current synthetic tasks.",
+        }
+
+    if focus == "allocation_strategy_search":
+        return {
+            "proposal_id": explicit_proposal_id or "allocation-strategy-search",
+            "title": "Search stronger weekly allocation strategies instead of prompt-only tweaks",
+            "hypothesis": (
+                "The harness has already become efficient; the next gains will come from materially different "
+                "allocation heuristics that trade off promos, value density, retailer coverage, and shortage severity."
+            ),
+            "why_now": [
+                f"Average score is already {avg_score}, but pass count is only {passed_num}/{passed_den}.",
+                f"Average turns are {avg_turns} and average input tokens are {avg_input_tokens}, so efficiency is no longer the main bottleneck.",
+                f"Worst tasks currently include {', '.join(worst_names) or 'the benchmark tail'}, suggesting the heuristic is plateauing.",
+            ],
+            "changes": [
+                "Mutate build_allocation_plan more aggressively instead of only tightening prompt wording.",
+                "Search among distinct strategy families such as weighted proportional, promo-first two-stage allocation, shortage-regime switching, and retailer floor plus density fill.",
+                "Allow limited changes to MAX_TURNS and the default strategy name, but keep validation strict.",
+                "Prefer strategies that raise passed tasks even if average score changes only modestly.",
+            ],
+            "expected_impact": [
+                "Higher pass count",
+                "Better tail-task performance",
+                "Less plateauing around the same 0.799 / 5-of-10 family",
+            ],
+            "acceptance_rule": [
+                "Primary objective: improve passed tasks on the full benchmark.",
+                "Secondary objective: improve avg_score without losing the pass-count gain.",
+            ],
+            "risk": "A more complex heuristic may regress a few easy tasks while improving harder ones.",
         }
 
     return {
